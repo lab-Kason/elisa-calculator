@@ -43,23 +43,25 @@ Each browser session gets its own data; nothing is stored on the server.
 
 ### Share with a permanent public link (no terminal needed)
 
+This repo is already published at
+**<https://github.com/lab-Kason/elisa-calculator>** (public, branch `main`).
+The steps below are for reference / re-publishing.
+
 **Step 1 — publish to GitHub (GitHub Desktop, ~2 min)**
 
 1. Open GitHub Desktop → *Sign in to GitHub.com* if you never have.
 2. `File` → `Add Local Repository…` → choose this `elisa-calculator`
    folder (the one containing `.git`) → **Add Repository**.
 3. Click **Publish repository** in the top bar → Name:
-   `elisa-ifng-calculator`, description
+   `elisa-calculator`, description
    “Streamlit app: ELISA standard curve + IFN-γ quantification (SCI 3102SEF Lab 4)”,
    **untick “Keep this code private”** → **Publish repository**.
-
-Result: `https://github.com/<your-username>/elisa-ifng-calculator`
 
 **Step 2 — deploy (Streamlit Community Cloud, ~2 min)**
 
 1. Open <https://share.streamlit.io> → *Sign in with GitHub*.
 2. **Create app** → *Deploy a public app from GitHub*.
-3. Repository: `<your-username>/elisa-ifng-calculator` · Branch: `main` ·
+3. Repository: `lab-Kason/elisa-calculator` · Branch: `main` ·
    Main file path: `app.py`.
 4. **Deploy** — wait 1–2 minutes; the public URL
    `https://<something>.streamlit.app` is ready to share on OLE.
