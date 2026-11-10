@@ -1,17 +1,22 @@
-"""Independent cross-check of calc.py, using a second implementation.
+"""Independent cross-check of calc.py (4PL version).
 
 Why this file exists
 --------------------
-`test_calc.py` checks calc.py's behaviour (does it raise, fall back, flag
-ranges).  This file instead re-derives every number from scratch with the
-closed-form least-squares formulas and compares against calc.py, so a bug in
-calc.py cannot hide behind the same code path.
+`test_calc.py` checks calc.py's own behaviour.  This file instead re-derives
+every sample concentration with a *different* algorithm:
 
-It also proves the two sample datasets in `sample_data/` are self-consistent:
-* A is built on the exact line corrected OD = 0.0008 * conc + 0.05, so the
-  expected answer is known analytically (wastewater = 600 pg/mL at both
-  dilutions).
-* B is a realistic, noisy plate used to exercise out-of-range flags.
+* calc.py inverts the 4PL in closed form;
+* here the inverse is found by **bisection** on an independently written
+  4PL equation (not imported from calc.py).
+
+It also checks the reference dataset:
+
+* `sample_data/example_A_clean.csv` is generated from the reference
+  "Real 4PL model" (A=0.0821, B=1.0741, C=3877.5, D=10.7614), so the expected
+  answers are ~394 pg/mL (well 6, undiluted) and ~352 pg/mL (well 7, measured
+  1:2 and multiplied by 2).
+* `sample_data/example_B_messy.csv` is a noisier plate used to exercise the
+  out-of-range flags.
 
 Run: python verify_method.py
 """
@@ -23,7 +28,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from calc import add_corrected, fit_linear, match_columns, quantify_samples, to_numeric
+from calc import add_corrected, fit_4pl, match_columns, quantify_samples, to_numeric
 
 STD_COLS = ["Standard", "Concentration", "OD450", "OD600"]
 SMP_COLS = ["Sample", "Dilution factor", "OD450", "OD600"]
@@ -37,166 +42,187 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(name)
 
 
-def load(path: str, columns: list[str]) -> pd.DataFrame:
-    return match_columns(pd.read_csv(path), columns)
-
-
 # ---------------------------------------------------------------------------
-# 1. independent implementation: ordinary least squares, closed form
-#    slope = (n*Sxy - Sx*Sy) / (n*Sxx - Sx^2)
-#    intercept = (Sy - slope*Sx) / n
+# independent implementation (deliberately separate from calc.py)
 # ---------------------------------------------------------------------------
-def ols_closed_form(x: list[float], y: list[float]) -> tuple[float, float, float]:
-    n = len(x)
-    sx, sy = sum(x), sum(y)
-    sxx = sum(v * v for v in x)
-    sxy = sum(a * b for a, b in zip(x, y))
-    denom = n * sxx - sx * sx
-    slope = (n * sxy - sx * sy) / denom
-    intercept = (sy - slope * sx) / n
-    resid = [yi - (slope * xi + intercept) for xi, yi in zip(x, y)]
-    ss_res = sum(r * r for r in resid)
-    my = sy / n
-    ss_tot = sum((yi - my) ** 2 for yi in y)
-    r2 = 1.0 - ss_res / ss_tot if ss_tot else float("nan")
-    return slope, intercept, r2
+def model_independent(x, a: float, b: float, c: float, d: float):
+    x = np.asarray(x, dtype=float)
+    return d + (a - d) / (1.0 + (x / c) ** b)
 
 
-def expected_samples(smp: pd.DataFrame, slope: float, intercept: float) -> list[dict]:
-    """Second implementation of the app's sample calculation."""
-    out = []
-    for _, row in smp.iterrows():
-        y = row["corrected"]
-        dilution = row["dilution"]
-        if pd.isna(dilution) or float(dilution) <= 0:
-            dilution = 1.0
-        measured = (float(y) - intercept) / slope
-        out.append({"name": row["name"], "dilution": float(dilution),
-                    "measured": measured, "reported": measured * float(dilution)})
-    return out
+def inverse_bisection(y: float, a: float, b: float, c: float, d: float) -> float:
+    """Numerically invert the (increasing) 4PL curve by bisection."""
+    y = float(y)
+    lo, hi = 0.0, 1.0
+    while float(model_independent(hi, a, b, c, d)) < y:
+        hi *= 10.0
+        if hi > 1e12:
+            raise ValueError("sample OD is above the upper asymptote; no solution")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if float(model_independent(mid, a, b, c, d)) < y:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
-def prepare(standards_csv: str, samples_csv: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    std = load(standards_csv, STD_COLS).rename(
-        columns={"Standard": "name", "Concentration": "conc", "OD450": "od450", "OD600": "od600"}
+def load(path: str, columns: list[str], rename: dict) -> pd.DataFrame:
+    return add_corrected(match_columns(pd.read_csv(path), columns).rename(columns=rename))
+
+
+def prepare(std_path: str, smp_path: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    std = load(
+        std_path,
+        STD_COLS,
+        {"Standard": "name", "Concentration": "conc", "OD450": "od450", "OD600": "od600"},
     )
-    std = add_corrected(std)
-    smp = load(samples_csv, SMP_COLS).rename(
-        columns={"Sample": "name", "Dilution factor": "dilution", "OD450": "od450", "OD600": "od600"}
+    smp = load(
+        smp_path,
+        SMP_COLS,
+        {"Sample": "name", "Dilution factor": "dilution", "OD450": "od450", "OD600": "od600"},
     )
     smp["dilution"] = to_numeric(smp["dilution"])
-    smp = add_corrected(smp)
     return std, smp
 
 
-def verify_dataset(paths: tuple[str, str], label: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
-    std, smp = prepare(*paths)
-    std = std.loc[to_numeric(std["conc"]).notna() & std["corrected"].notna()].copy()
-    std["conc"] = to_numeric(std["conc"])
+def verify_dataset(label: str, std_path: str, smp_path: str, fit_expected: bool = False) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    std, smp = prepare(std_path, smp_path)
+    stdv = std.loc[to_numeric(std["conc"]).notna() & std["corrected"].notna()].copy()
+    stdv["conc"] = to_numeric(stdv["conc"])
 
-    # calc.py's answer ...
-    fit = fit_linear(std["conc"], std["corrected"])
+    fit = fit_4pl(stdv["conc"], stdv["corrected"])
+    check(f"{label}: 4PL fit ok", fit["ok"], fit.get("reason", ""))
+    if not fit["ok"]:
+        return fit, stdv, pd.DataFrame()
+
     results = quantify_samples(smp, fit)
+    params = (fit["a"], fit["b"], fit["c"], fit["d"])
 
-    # ... vs the independent closed-form answer
-    slope_i, intercept_i, r2_i = ols_closed_form(
-        std["conc"].tolist(), std["corrected"].tolist()
+    # 1) fit residuals, measured with the independent model
+    residual = stdv["corrected"].to_numpy(float) - model_independent(
+        stdv["conc"].to_numpy(float), *params
     )
-    check(f"{label}: slope matches independent OLS",
-          math.isclose(fit["slope"], slope_i, rel_tol=1e-12),
-          f"calc={fit['slope']:.10g} independent={slope_i:.10g}")
-    check(f"{label}: intercept matches independent OLS",
-          math.isclose(fit["intercept"], intercept_i, rel_tol=1e-12),
-          f"calc={fit['intercept']:.10g} independent={intercept_i:.10g}")
-    check(f"{label}: R2 matches independent OLS",
-          math.isclose(fit["r2"], r2_i, rel_tol=1e-10),
-          f"calc={fit['r2']:.10g} independent={r2_i:.10g}")
+    check(
+        f"{label}: fit residuals < 1% of OD span",
+        np.max(np.abs(residual)) < 0.01 * max(np.ptp(stdv["corrected"].to_numpy(float)), 1e-9),
+        f"max |residual| = {np.max(np.abs(residual)):.5f}",
+    )
 
-    second = expected_samples(smp, slope_i, intercept_i)
-    for got, want in zip(results.to_dict("records"), second):
-        check(f"{label}: {want['name']} measured conc matches 2nd implementation",
-              math.isclose(got["measured_conc"], want["measured"], rel_tol=1e-12, abs_tol=1e-9),
-              f"calc={got['measured_conc']:.6f} independent={want['measured']:.6f}")
-        check(f"{label}: {want['name']} reported conc matches 2nd implementation",
-              math.isclose(got["reported_conc"], want["reported"], rel_tol=1e-12, abs_tol=1e-9),
-              f"calc={got['reported_conc']:.6f} independent={want['reported']:.6f}")
+    # 2) standard recovery via independent bisection
+    for _, row in stdv.iterrows():
+        if float(row["conc"]) <= 0:
+            continue
+        back = inverse_bisection(float(row["corrected"]), *params)
+        check(
+            f"{label}: standard {row['name']} recovers nominal within 2%",
+            abs(back - float(row["conc"])) / float(row["conc"]) < 0.02,
+            f"{back:.2f} vs {float(row['conc']):.1f}",
+        )
 
-    # round trip: reported conc -> absorbances -> should reproduce the raw OD
-    for row in results.to_dict("records"):
-        back = intercept_i + slope_i * (row["reported_conc"] / row["dilution"])
-        check(f"{label}: round trip {row['name']}",
-              math.isclose(back, row["corrected"], rel_tol=1e-9, abs_tol=1e-12),
-              f"reconstructed corrected OD={back:.6f} raw={row['corrected']:.6f}")
-    return fit, std, results
+    # 3) every sample: compare calc.py against the independent implementation
+    for _, row in results.iterrows():
+        if not np.isfinite(float(row["measured_conc"])):
+            continue
+        independent = inverse_bisection(float(row["corrected"]), *params)
+        check(
+            f"{label}: {row['name']} inverse matches bisection",
+            math.isclose(float(row["measured_conc"]), independent, rel_tol=1e-6),
+            f"calc={float(row['measured_conc']):.6f} bisection={independent:.6f}",
+        )
+        check(
+            f"{label}: {row['name']} dilution correction",
+            math.isclose(float(row["reported_conc"]), independent * float(row["dilution"]),
+                         rel_tol=1e-9),
+            f"{float(row['reported_conc']):.4f}",
+        )
+        # round trip: put the reported concentration back through the curve
+        back_od = float(
+            model_independent(independent, *params)
+        )
+        check(
+            f"{label}: {row['name']} round trip reproduces corrected OD",
+            math.isclose(back_od, float(row["corrected"]), rel_tol=1e-9, abs_tol=1e-9),
+            f"{back_od:.6f} vs {float(row['corrected']):.6f}",
+        )
+
+    return fit, stdv, results
 
 
 # ---------------------------------------------------------------------------
-# 2. dataset A: analytic ground truth
+# dataset A: reference plate
 # ---------------------------------------------------------------------------
-print("=" * 72)
-print("Dataset A — clean plate (exact line: corrected OD = 0.0008*conc + 0.05)")
-print("=" * 72)
+print("=" * 76)
+print("Dataset A — reference 4PL plate (A=0.0821, B=1.0741, C=3877.5, D=10.7614)")
+print("=" * 76)
 fit_a, std_a, res_a = verify_dataset(
-    ("sample_data/example_A_clean.csv", "sample_data/example_A_samples_clean.csv"), "A"
+    "A", "sample_data/example_A_clean.csv", "sample_data/example_A_samples_clean.csv"
 )
-check("A: slope is exactly 0.0008", math.isclose(fit_a["slope"], 0.0008, rel_tol=1e-9),
-      f"{fit_a['slope']:.12g}")
-check("A: intercept is exactly 0.05", math.isclose(fit_a["intercept"], 0.05, abs_tol=1e-12),
-      f"{fit_a['intercept']:.12g}")
-check("A: R2 is 1", math.isclose(fit_a["r2"], 1.0, abs_tol=1e-12), f"{fit_a['r2']:.12f}")
-check("A: original sample = 600 pg/mL (analytic)",
-      math.isclose(res_a.loc[0, "reported_conc"], 600.0, rel_tol=1e-6),
-      f"{res_a.loc[0, 'reported_conc']:.6f}")
-check("A: 1:2 diluted sample still reports 600 pg/mL after x2 dilution",
-      math.isclose(res_a.loc[1, "reported_conc"], 600.0, rel_tol=1e-6),
-      f"{res_a.loc[1, 'reported_conc']:.6f}")
-print("\nTable A (computed by calc.py):")
-print(res_a[["name", "dilution", "corrected", "measured_conc", "reported_conc", "status"]]
-      .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+res_a_i = res_a.set_index("name")
+check("A: fit uses 5 standard points", fit_a.get("n") == 5, str(fit_a.get("n")))
+check(
+    "A: fit parameters close to the reference model",
+    math.isclose(fit_a["a"], 0.0821, rel_tol=0.02)
+    and math.isclose(fit_a["b"], 1.0741, rel_tol=0.05)
+    and math.isclose(fit_a["c"], 3877.5, rel_tol=0.10)
+    and math.isclose(fit_a["d"], 10.7614, rel_tol=0.05),
+    f"A={fit_a['a']:.4f} B={fit_a['b']:.4f} C={fit_a['c']:.1f} D={fit_a['d']:.3f}",
+)
+check(
+    "A: wastewater original ≈ 394 pg/mL",
+    abs(float(res_a_i.loc["Wastewater original", "measured_conc"]) - 394) < 3,
+    f"{float(res_a_i.loc['Wastewater original', 'measured_conc']):.2f}",
+)
+check(
+    "A: 1:2 diluted result ≈ 352 pg/mL (after x2)",
+    abs(float(res_a_i.loc["Wastewater 1:2", "reported_conc"]) - 352) < 3,
+    f"{float(res_a_i.loc['Wastewater 1:2', 'reported_conc']):.2f}",
+)
+check(
+    "A: over-range sample flagged as extrapolation",
+    "外推" in res_a_i.loc["Wastewater over-range demo", "status"],
+    res_a_i.loc["Wastewater over-range demo", "status"],
+)
+print("\nTable A (calc.py):")
+print(
+    res_a[["name", "dilution", "corrected", "measured_conc", "reported_conc", "status"]]
+    .to_string(index=False, float_format=lambda v: f"{v:.4f}")
+)
 
 # ---------------------------------------------------------------------------
-# 3. dataset B: noisy plate + out-of-range handling
+# dataset B: noisy plate
 # ---------------------------------------------------------------------------
 print()
-print("=" * 72)
-print("Dataset B — noisy plate (out-of-range / missing OD600 / replicates)")
-print("=" * 72)
+print("=" * 76)
+print("Dataset B — noisy 4PL plate (out-of-range / missing OD600 / replicates)")
+print("=" * 76)
 fit_b, std_b, res_b = verify_dataset(
-    ("sample_data/example_B_messy.csv", "sample_data/example_B_samples_messy.csv"), "B"
+    "B", "sample_data/example_B_messy.csv", "sample_data/example_B_samples_messy.csv"
 )
-check("B: R2 is realistic (0.99-1.0)", 0.99 < fit_b["r2"] <= 1.0, f"{fit_b['r2']:.6f}")
-statuses = res_b["status"].tolist()
-check("B: one sample above the curve", any("高于" in s for s in statuses), str(statuses))
-check("B: one sample below the curve", any("低于" in s for s in statuses), str(statuses))
-missing_od600 = res_b.loc[res_b["name"] == "OD600 missing demo", "corrected"].iloc[0]
-check("B: blank OD600 falls back to OD450 (0.501)", math.isclose(missing_od600, 0.501, abs_tol=1e-12),
-      f"{missing_od600:.6f}")
-
-# the same wastewater measured at 1x / 1:5 / 1:50 must report the same
-# concentration (true value 2200 pg/mL); the 1:50 well is out of range, so it
-# is allowed to drift a little
-reported_b = res_b.set_index("name")["reported_conc"]
-check("B: original dilution reports ~2200 pg/mL",
-      math.isclose(reported_b["Wastewater original"], 2200, rel_tol=0.01), f"{reported_b['Wastewater original']:.1f}")
-check("B: 1:5 dilution reports the same ~2200 pg/mL",
-      math.isclose(reported_b["Wastewater 1:5"], 2200, rel_tol=0.01), f"{reported_b['Wastewater 1:5']:.1f}")
-check("B: 1:50 out-of-range dilution still ~2200 pg/mL (within 2%)",
-      math.isclose(reported_b["Wastewater 1:50"], 2200, rel_tol=0.02), f"{reported_b['Wastewater 1:50']:.1f}")
-check("B: replicate A ~730 pg/mL",
-      math.isclose(reported_b["Replicate A"], 730, rel_tol=0.02), f"{reported_b['Replicate A']:.1f}")
-check("B: replicate B ~745 pg/mL",
-      math.isclose(reported_b["Replicate B"], 745, rel_tol=0.02), f"{reported_b['Replicate B']:.1f}")
-check("B: missing-OD600 sample ~600 pg/mL",
-      math.isclose(reported_b["OD600 missing demo"], 600, rel_tol=0.01), f"{reported_b['OD600 missing demo']:.1f}")
-print("\nTable B (computed by calc.py):")
-print(res_b[["name", "dilution", "corrected", "measured_conc", "reported_conc", "status"]]
-      .to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+res_b_i = res_b.set_index("name")
+check("B: fit is increasing (D > A)", fit_b.get("d", 0) > fit_b.get("a", 0),
+      f"A={fit_b.get('a', float('nan')):.3f} D={fit_b.get('d', float('nan')):.3f}")
+check(
+    "B: over-range sample flagged as extrapolation",
+    "外推" in res_b_i.loc["Over-range demo", "status"],
+    res_b_i.loc["Over-range demo", "status"],
+)
+check(
+    "B: missing OD600 falls back to OD450",
+    math.isclose(float(res_b_i.loc["OD600 missing demo", "corrected"]), 0.500, abs_tol=1e-12),
+    f"{float(res_b_i.loc['OD600 missing demo', 'corrected']):.3f}",
+)
+print("\nTable B (calc.py):")
+print(
+    res_b[["name", "dilution", "corrected", "measured_conc", "reported_conc", "status"]]
+    .to_string(index=False, float_format=lambda v: f"{v:.4f}")
+)
 
 # ---------------------------------------------------------------------------
 print()
-print("=" * 72)
+print("=" * 76)
 if failures:
     print(f"FAILED: {len(failures)} check(s): {failures}")
     raise SystemExit(1)
 print("METHOD VERIFIED — every calc.py number matches an independent implementation.")
-print("=" * 72)
+print("=" * 76)

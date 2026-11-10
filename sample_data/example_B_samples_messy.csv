@@ -1,7 +1,8 @@
 Sample,Dilution factor,OD450,OD600
-Wastewater original,1,1.884,0.060
-Wastewater 1:5,5,0.416,0.048
-Wastewater 1:50,50,0.085,0.045
-Replicate A,1,0.658,0.050
-Replicate B,1,0.671,0.051
-OD600 missing demo,1,0.501,
+Wastewater original,1,0.930,0
+Wastewater 1:2,2,0.455,0
+Wastewater 1:10,10,0.120,0
+Replicate A,1,0.520,0
+Replicate B,1,0.525,0
+OD600 missing demo,1,0.500,
+Over-range demo,1,4.500,0
