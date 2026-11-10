@@ -17,6 +17,8 @@ Built for the worksheet line:
 | `app.py` | Streamlit page (2 input tabs + results tab) |
 | `calc.py` | Pure calculation: corrected OD, linear fit, inverse + dilution |
 | `test_calc.py` | Plain-Python checks for `calc.py` (no Streamlit needed) |
+| `verify_method.py` | Re-derives every number with an independent closed-form implementation |
+| `sample_data/` | Two synthetic plates for testing, with expected answers (`sample_data/README.md`) |
 | `requirements.txt` | Dependencies |
 
 ## Run it locally
@@ -98,6 +100,22 @@ Readings outside the standard OD range are flagged
 **低于 / 高于标准曲线范围（外推）** — the app still calculates them, but the
 report should mention the extrapolation.
 
+## Sample data and method verification
+
+Two synthetic plates live in `sample_data/` — see `sample_data/README.md` for
+the expected answers and what each one is designed to exercise:
+
+| Dataset | Purpose | Expected result |
+|---|---|---|
+| A — clean | exact line `corrected OD = 0.0008·conc + 0.05`; same wastewater at 1x and 1:2 | 600 pg/mL both ways, R² = 1 |
+| B — messy | noisy curve, over-range 1x, under-range 1:50, replicate wells, blank OD600 | ~2200 pg/mL at 1x and 1:5, ~730 / ~745 pg/mL replicates |
+
+`python verify_method.py` is the proof: it recomputes slope, intercept, R²,
+inverse concentrations and the dilution correction with the closed-form
+least-squares formulas (a second, independent implementation), compares them
+to `calc.py`, and reconstructs the raw OD from each reported concentration
+(round-trip check). It must finish with **METHOD VERIFIED**.
+
 ## Deliberate limitations
 
 - It is a **teaching aid**, not a validated assay tool: no blank subtraction
@@ -111,7 +129,8 @@ report should mention the extrapolation.
 ## Verify / extend
 
 ```bash
-python test_calc.py     # calculation + CSV header checks
+python test_calc.py      # calculation + CSV header checks
+python verify_method.py  # independent re-derivation of every number
 ```
 
 To add a 4-parameter logistic fit later, add a function in `calc.py`, then a

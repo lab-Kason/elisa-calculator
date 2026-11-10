@@ -261,7 +261,7 @@ with tab_result:
             st.caption(f"当前有效标准点：{fit.get('n', 0)} 个。{fit['reason']}")
     else:
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("R²", f"{fit['r2']:.4f}" if np.isfinite(fit["r2"]) else "—")
+        m1.metric("R²", f"{fit['r2']:.5f}" if np.isfinite(fit["r2"]) else "—")
         m2.metric("斜率 Slope", f"{fit['slope']:.4f}")
         m3.metric("截距 Intercept", f"{fit['intercept']:.4f}")
         m4.metric("标准点数量", f"{fit['n']}")
